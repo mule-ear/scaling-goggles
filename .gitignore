@@ -91,4 +91,5 @@ ENV/
 # Exclude sql databases
 *.db
 
-
+# AFter the initial commit - ignore the conf dir as it will change for each user
+conf/*
