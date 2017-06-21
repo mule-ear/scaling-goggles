@@ -1,9 +1,10 @@
 #! /usr/bin/env python3
 
-import os, sys, sqlite3, time
+import os, sys, sqlite3, time, datetime
 import logging, logging.config 
 import configparser, argparse
 import tarfile, zipfile
+import pickle
 
 try:
     import magic
@@ -49,7 +50,7 @@ def generate_directories_table(baseDir, cur, log, dirList):
     # Populate dirs table 
     # CREATE TABLE directories (id INTEGER PRIMARY KEY AUTOINCREMENT, name VARCHAR, path VARCHAR, full_path VARCHAR);
     # The idea being that the dir will have its own name, path is the parent, full_path is what I'll add 
-    log.info("generating data for directories table")
+    log.info("Generating data for directories table")
     cur.execute("DROP TABLE IF EXISTS directories;")
     cur.execute("CREATE TABLE directories (id INTEGER PRIMARY KEY AUTOINCREMENT, name VARCHAR, path VARCHAR, full_path VARCHAR);")
 
@@ -60,6 +61,8 @@ def generate_directories_table(baseDir, cur, log, dirList):
         # sqCur1.execute("INSERT INTO directories (name, path, full_path) VALUES(?,?,?)", insertValues)
         cur.execute("INSERT INTO directories (name, path, full_path) VALUES(?,?,?)", (i.rsplit('/',1)[1]+'/' , i.rsplit('/',1)[0]+'/' , i+'/'))
             
+    log.info("directories table data generation complete.")
+
 def create_tables_for_books(cur, log):
     log.info("Creating Tables")
     # CREATE the tables needed for books
@@ -86,6 +89,8 @@ def create_tables_for_books(cur, log):
                     CONSTRAINT type_id FOREIGN KEY (type) REFERENCES types(id), \
                     CONSTRAINT author_id FOREIGN KEY (author) REFERENCES authors(id));")
 
+    log.info("The tables have been created.")
+
 def does_type_exist(a_type, cur, log):
     a_type = a_type.lower()
     cur.execute("SELECT id FROM types WHERE extension = ?",(a_type,))
@@ -104,46 +109,50 @@ def populate_files_table(cur, log, dirList):
     # listOfDirs = [x[0] for x in os.walk(basedir)]
 
     for dir1 in dirList:
-
-        try:
-
-            for entry in os.listdir(dir1):
-                log.debug("entry = " + entry)
-                # make sure it's a file (and not a dir) and it has an extension
-                if (os.path.isfile(os.path.join(dir1, entry)) and '.' in entry):
-                    log.debug("Is a file " + dir1+ '/' + entry + ", dir = " + dir1 +", full_name = "+ entry)
-                    cur.execute("SELECT id FROM directories WHERE full_path = ?",(dir1 + '/',))
-                    result = sqCur1.fetchone()
-                    if result is None:
-                        raise RuntimeError("'"+dir1 + "' not in database!")
+        for entry in os.listdir(dir1):
+            log.debug("entry = " + entry)
+            # make sure it's a file (and not a dir) and it has an extension
+            if (os.path.isfile(os.path.join(dir1, entry)) and '.' in entry):
+                log.debug("Is a file " + dir1+ '/' + entry + ", dir = " + dir1 +", full_name = "+ entry)
+                cur.execute("SELECT id FROM directories WHERE full_path = ?",(dir1 + '/',))
+                result = sqCur1.fetchone()
+                if result is None:
+                    raise RuntimeError("'"+dir1 + "' not in database!")
                                            
-                    log.debug("directories.id = " + str(result))
-                    name, ext = entry.rsplit('.',1)
-                    does_type_exist(ext, cur, log)
+                log.debug("directories.id = " + str(result))
+                name, ext = entry.rsplit('.',1)
+                # sometimes the name starts with a '.' and has no extension in which case:
+                if name == '':
+                    log.debug("This is a hidden file and starts with a '.', no extension - entry = " + str(entry))
+                    name = ext
+                    ext = ''
 
-                    try:
-                        query = "INSERT INTO files(name, path, type) VALUES(?,(SELECT id FROM directories WHERE full_path = ?) , (SELECT id FROM types WHERE extension = ?))"
-                    except:
-                        msg = "Could not insert row for name = "+ name + ", path = " + path+ ", type = " + ext + ", entry = " + entry
-                        log.error(msg)
-                        raise RuntimeError(msg)
-                    else:
-                        log.debug("name = {0}, ext = {1}".format(name, ext))
-                        
+                does_type_exist(ext, cur, log)
+
+                try:
+                    query = "INSERT INTO files(name, path, type) VALUES(?,(SELECT id FROM directories WHERE full_path = ?) , (SELECT id FROM types WHERE extension = ?))"
                     query_values = (name, dir1 + '/', ext)
                     sqCur1.execute(query, query_values)
-        except PermissionError as p:
-            log.error("Could not access " + str(entry) + str(p))
+                        
+                except PermissionError as p:
+                    log.error("Could not access " + str(entry) + str(p))
 
-        except Exception as e:
-            log.error(str(e))
-            log.error("Error details: entry = " + str(entry) + "dir1 = " + str(dir1))
+                except Exception as e:
+                    log.error(str(e))
+                    log.error("Error details: entry = " + str(entry) + "dir1 = " + str(dir1))
 
-        else:
-            sqCon.commit()                
+                except:
+                    msg = "Could not insert row for name = "+ name + ", path = " + dir1 + ", type = " + ext + ", entry = " + entry
+                    log.error(msg)
+                    raise RuntimeError(msg)
+
+                else:
+                    log.debug("name = {0}, ext = {1}".format(name, ext))
+                    sqCon.commit()                
                 
 if __name__ == "__main__":
     
+    start = time.time()
     logLvl, database, directory  = get_config_values()
     logLvl,basedir, db = get_cli_arguments(logLvl, database, directory)
     numeric_level = getattr(logging, logLvl.upper(), None)
@@ -168,15 +177,24 @@ if __name__ == "__main__":
     logging.info("Getting list of directories from the base directory. This may take a while.")
     listOfDirs = [x[0] for x in os.walk(basedir)]
     logging.info("List collected.")
-	
+
     sqCon = sqlite3.Connection(database=db)
     sqCon.isolation_level = None #Added for autocommit
     sqCur1 = sqCon.cursor()
 
     generate_directories_table(basedir,sqCur1,logger, listOfDirs)
+    # There is a problem with very large volumes that needs to be solved.
+    # It takes a LONG time to scan.
+    # While itereating through the list of directories is convenient and clean,
+    # I think it would be better to itereate throught the directories table and
+    # store the id of the last directory scanned
+    # So - I need to re-work the populate_files_table funtion like that
     create_tables_for_books(sqCur1, logger)
     populate_files_table(sqCur1, logger, listOfDirs)
 
+    elapsedTime = time.time() - start
+    logging.info("Done. Cleaning up...")
+    logging.info("Elapsed time " + str(datetime.timedelta(seconds=elapsedTime)))
     sqCon.commit()
     sqCon.close()
 

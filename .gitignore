@@ -92,5 +92,9 @@ ENV/
 *.db
 *-journal
 
-# AFter the initial commit - ignore the conf dir as it will change for each user
+# After the initial commit - ignore the conf dir as it will change for each user
 conf/*
+
+# And ignore the archive directory
+archive/
+archive/*
